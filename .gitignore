@@ -20,6 +20,8 @@ keystore/
 *.keystore
 
 # Local tooling
+.direnv/
+*.p12
 .claude/
 
 # Local-only agent standards (not shared)
