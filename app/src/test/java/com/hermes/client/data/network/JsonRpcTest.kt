@@ -22,6 +22,22 @@ class JsonRpcTest {
         assertTrue(back.toString().contains("\"text\":\"hi\""))
     }
 
+    @Test fun classifies_string_server_request_before_numeric_reply() {
+        val msg = parseInbound(json, """{"jsonrpc":"2.0","id":"srq-fixture","method":"vault.code","params":{"session_id":"synthetic-s1"}}""") as RpcServerRequest
+        assertEquals("srq-fixture", msg.id)
+        assertEquals("vault.code", msg.method)
+        assertEquals("RpcServerRequest", msg.toString())
+    }
+
+    @Test(expected = IllegalArgumentException::class) fun string_reply_id_is_not_a_numeric_reply() {
+        parseInbound(json, """{"jsonrpc":"2.0","id":"srq-fixture","result":{}}""")
+    }
+
+    @Test fun malformed_request_params_remain_classifiable_for_static_error() {
+        val msg = parseInbound(json, """{"jsonrpc":"2.0","id":"srq-fixture","method":"sudo","params":null}""") as RpcServerRequest
+        assertEquals(null, msg.params)
+    }
+
     @Test fun parses_result_reply() {
         val line = """{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"""
         val msg = parseInbound(json, line)

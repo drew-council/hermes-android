@@ -2,6 +2,7 @@ package com.hermes.client.data.network
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 @Serializable data class StatusDto(val ok: Boolean = true)
 
@@ -43,12 +44,32 @@ import kotlinx.serialization.Serializable
 )
 
 @Serializable data class MessageDto(
-    // The gateway returns a numeric message id, and content may be null (e.g. tool-only turns).
-    val id: Int? = null,
+    val id: Long? = null,
     val role: String,
-    val content: String? = null,
+    val content: JsonElement? = null,
+    @SerialName("tool_calls") val toolCalls: JsonElement? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    @SerialName("tool_name") val toolName: String? = null,
+    val reasoning: JsonElement? = null,
+    @SerialName("reasoning_content") val reasoningContent: JsonElement? = null,
+    @SerialName("codex_message_items") val codexMessageItems: JsonElement? = null,
+    @SerialName("reasoning_details") val reasoningDetails: JsonElement? = null,
+    @SerialName("thinking_blocks") val thinkingBlocks: JsonElement? = null,
+    @SerialName("codex_reasoning_items") val codexReasoningItems: JsonElement? = null,
+    @SerialName("display_content") val displayContent: JsonElement? = null,
+    @SerialName("display_kind") val displayKind: String? = null,
+    @SerialName("display_metadata") val displayMetadata: JsonElement? = null,
+    val timestamp: Double? = null,
 )
-@Serializable data class MessagesDto(val messages: List<MessageDto> = emptyList())
+@Serializable data class HistoryPaginationDto(
+    val limit: Int = 500, val offset: Int = 0, val order: String = "latest", val returned: Int = 0,
+)
+@Serializable data class MessagesDto(
+    val messages: List<MessageDto> = emptyList(),
+    @SerialName("session_id") val sessionId: String? = null,
+    val profile: String? = null,
+    val pagination: HistoryPaginationDto? = null,
+)
 
 @Serializable data class ProfileDto(
     val name: String,

@@ -7,7 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 data class RpcRequest(val id: Long, val method: String, val params: JsonObject) {
@@ -28,6 +28,9 @@ sealed interface RpcInbound
 data class RpcResult(val id: Long, val result: JsonElement) : RpcInbound
 data class RpcErrorReply(val id: Long, val error: RpcError) : RpcInbound
 data class RpcEvent(val event: ServerEvent) : RpcInbound
+class RpcServerRequest(val id: String, val method: String, val params: JsonObject?) : RpcInbound {
+    override fun toString() = "RpcServerRequest"
+}
 
 fun parseInbound(json: Json, line: String): RpcInbound {
     val obj = json.parseToJsonElement(line).jsonObject
@@ -36,7 +39,12 @@ fun parseInbound(json: Json, line: String): RpcInbound {
         val params = obj.objOrEmpty("params")
         return RpcEvent(ServerEvent.from(params))
     }
-    val id = obj["id"]?.jsonPrimitive?.long ?: -1L
+    val wireId = obj["id"] as? JsonPrimitive
+    if (method != null && wireId?.isString == true) {
+        return RpcServerRequest(wireId.content, method, obj["params"] as? JsonObject)
+    }
+    require(method == null && wireId != null && !wireId.isString) { "Invalid RPC frame" }
+    val id = requireNotNull(wireId.longOrNull) { "Invalid RPC id" }
     obj["error"]?.let {
         val e = it.jsonObject
         return RpcErrorReply(

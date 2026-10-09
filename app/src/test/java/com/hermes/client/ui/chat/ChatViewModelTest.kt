@@ -1,6 +1,7 @@
 package com.hermes.client.ui.chat
 
 import app.cash.turbine.test
+import com.hermes.client.domain.withAuthoredPrompt
 import com.hermes.client.data.network.ConnectionState
 import com.hermes.client.data.network.ProfileDto
 import com.hermes.client.data.network.ServerEvent
@@ -50,15 +51,54 @@ class ChatViewModelTest {
         every { chatRepo.connectionState } returns connectionStateFlow
         // resume returns null here so the ViewModel keeps the opened id stable for these tests
         // (production switches to the live handle resume returns).
-        coEvery { chatRepo.resume(any(), any()) } returns null
+        coEvery { chatRepo.resumeSnapshot(any(), any()) } answers { com.hermes.client.data.network.ResumeDto(sessionId = firstArg()) }
         every { profileManager.active } returns MutableStateFlow<String?>(null)
-        coEvery { sessionRepo.history(any(), any()) } returns emptyList()
+        coEvery { sessionRepo.historySnapshot(any(), any()) } returns com.hermes.client.domain.TimelineSnapshot()
         coEvery { modelRepo.options() } returns emptyList()
         coEvery { modelRepo.providers() } returns emptyList()
         coEvery { profileRepo.list() } returns emptyList()
         every { favoritesStore.favorites } returns MutableStateFlow(emptySet())
         every { tts.speaking } returns MutableStateFlow(false)
         every { promptStore.prompts } returns MutableStateFlow(emptyList())
+    }
+
+    @Test fun private_request_response_never_enters_chat_and_registration_is_explicit() = runTest {
+        val vm = buildVm()
+        vm.registerServerRequestRenderer()
+        io.mockk.verify { chatRepo.setServerRequestHandlerAvailable(true) }
+        vm.open("s1")
+        advanceUntilIdle()
+        val before = vm.state.value
+        val request = com.hermes.client.data.network.PendingServerRequest("fixture-wire", "vault.code", "s1",
+            buildJsonObject { put("session_id", "s1"); put("site", "example.invalid") }, 1, false)
+        every { chatRepo.respondServerRequest(request, any()) } returns com.hermes.client.data.network.RespondOutcome.ENQUEUED
+        val result = buildJsonObject { put("value", "SYNTHETIC_PRIVATE_CANARY") }
+        assertEquals(com.hermes.client.data.network.RespondOutcome.ENQUEUED, vm.respondServerRequest(request, result))
+        assertEquals(before.timeline.entries, vm.state.value.timeline.entries)
+        assertEquals(before.messages, vm.state.value.messages)
+        assertFalse(vm.state.value.toString().contains("SYNTHETIC_PRIVATE_CANARY"))
+        io.mockk.verify(exactly = 1) { chatRepo.respondServerRequest(request, result) }
+    }
+
+    @Test fun legacy_approval_failure_preserves_pending_marker_and_stale_request_cannot_send() = runTest {
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+        events.emit(ServerEvent("approval.request", "s1", buildJsonObject {
+            put("request_id", "fixture-queue"); put("command", "synthetic command")
+        }))
+        advanceUntilIdle()
+        val request = vm.state.value.pendingApproval!!
+        assertEquals("fixture-queue", request.requestId)
+        coEvery { chatRepo.respondApproval(any(), any(), any()) } throws IllegalStateException("synthetic failure")
+        assertFalse(vm.respondLegacyApproval(request, ApprovalChoice.DENY))
+        assertTrue(vm.state.value.pendingApproval === request)
+        val marker = vm.state.value.timeline.entries.last().body as com.hermes.client.domain.TimelineBody.Interaction
+        assertEquals(com.hermes.client.domain.InteractionState.PENDING, marker.state)
+        vm.open("s2")
+        advanceUntilIdle()
+        assertFalse(vm.respondLegacyApproval(request, ApprovalChoice.ONCE))
+        coVerify(exactly = 1) { chatRepo.respondApproval("s1", ApprovalChoice.DENY, "fixture-queue") }
     }
 
     private fun buildVm() = ChatViewModel(chatRepo, sessionRepo, modelRepo, profileRepo, profileManager, favoritesStore, pendingShareStore, tts, promptStore, configRepo)
@@ -93,7 +133,7 @@ class ChatViewModelTest {
         advanceUntilIdle()
 
         // resume must have been called exactly twice: once in open(), once on reconnect
-        coVerify(exactly = 2) { chatRepo.resume("s1", null) }
+        coVerify(exactly = 2) { chatRepo.resumeSnapshot("s1", null) }
     }
 
     /**
@@ -107,7 +147,7 @@ class ChatViewModelTest {
         val vm = buildVm()
         vm.open("s1")
         advanceUntilIdle()
-        coVerify { chatRepo.resume("s1", "personal") }
+        coVerify { chatRepo.resumeSnapshot("s1", "personal") }
     }
 
     /**
@@ -116,7 +156,7 @@ class ChatViewModelTest {
      * post-resume sessionId is at that time.
      */
     @Test fun open_stages_pending_share_image_as_attachment() = runTest {
-        coEvery { chatRepo.resume("s1", null) } returns "s1-live"
+        coEvery { chatRepo.resumeSnapshot("s1", null) } returns com.hermes.client.data.network.ResumeDto(sessionId = "s1-live")
         pendingShareStore.put(
             "s1",
             // Valid base64 (decodes to "abc") — real decode logic runs in unit tests.
@@ -161,9 +201,10 @@ class ChatViewModelTest {
         advanceUntilIdle()
 
         val s = vm.state.value
-        assertFalse("isGenerating should be cleared after Reconnecting", s.isGenerating)
+        assertTrue("transport loss does not terminate generation", s.isGenerating)
+        assertFalse(s.timeline.ready)
         val lastMsg = s.messages.lastOrNull()
-        assertTrue("last message should be marked interrupted", lastMsg?.interrupted == true)
+        assertTrue("last message stays streaming until terminal evidence", lastMsg?.isStreaming == true)
     }
 
     /**
@@ -179,7 +220,7 @@ class ChatViewModelTest {
         advanceUntilIdle()
 
         // Only one resume from open(); the Connected transition had prev==Connecting (not Reconnecting)
-        coVerify(exactly = 1) { chatRepo.resume("s1", null) }
+        coVerify(exactly = 1) { chatRepo.resumeSnapshot("s1", null) }
     }
 
     // Changing the model inside a chat (SESSION scope, the default) must switch THIS session's
@@ -293,5 +334,111 @@ class ChatViewModelTest {
 
         assertTrue("a gateway rejection must surface a persona error", vm.personaUi.value.error != null)
         assertEquals(null, vm.personaUi.value.active)
+    }
+
+    @Test fun blocked_history_buffers_early_handle_events_and_blocks_send_until_ready() = runTest {
+        val history = kotlinx.coroutines.CompletableDeferred<com.hermes.client.domain.TimelineSnapshot>()
+        coEvery { sessionRepo.historySnapshot("s1", null) } coAnswers { history.await() }
+        coEvery { chatRepo.resumeSnapshot("s1", null) } returns com.hermes.client.data.network.ResumeDto(sessionId = "live")
+        val vm = buildVm()
+        vm.open("s1")
+        advanceUntilIdle()
+        vm.send("must not submit")
+        coVerify(exactly = 0) { chatRepo.submit(any(), any()) }
+        events.emit(ServerEvent("message.start", "live", buildJsonObject {}))
+        events.emit(ServerEvent("message.delta", "live", buildJsonObject { put("text", "early") }))
+        advanceUntilIdle()
+        history.complete(com.hermes.client.domain.TimelineSnapshot())
+        advanceUntilIdle()
+        assertTrue(vm.state.value.timeline.ready)
+        assertEquals("early", (vm.state.value.timeline.entries.last().body as com.hermes.client.domain.TimelineBody.Message).content.text)
+        vm.send("now")
+        advanceUntilIdle()
+        coVerify { chatRepo.submit("live", "now") }
+    }
+
+    @Test fun reopening_cancels_and_epoch_guards_even_non_cancellable_old_history() = runTest {
+        val old = kotlinx.coroutines.CompletableDeferred<com.hermes.client.domain.TimelineSnapshot>()
+        coEvery { sessionRepo.historySnapshot("A", null) } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { old.await() }
+        }
+        val vm = buildVm()
+        vm.open("A"); advanceUntilIdle()
+        vm.open("B"); advanceUntilIdle()
+        events.emit(ServerEvent("message.start", "B", buildJsonObject {}))
+        events.emit(ServerEvent("message.delta", "B", buildJsonObject { put("text", "B content") }))
+        advanceUntilIdle()
+        old.complete(com.hermes.client.domain.TimelineSnapshot().withAuthoredPrompt("A stale"))
+        advanceUntilIdle()
+        assertEquals("B content", (vm.state.value.timeline.entries.last().body as com.hermes.client.domain.TimelineBody.Message).content.text)
+        coVerify(exactly = 0) { chatRepo.resumeSnapshot("A", any()) }
+        vm.send("B prompt"); advanceUntilIdle()
+        coVerify { chatRepo.submit("B", "B prompt") }
+    }
+
+    @Test fun profile_is_captured_once_across_history_and_resume_suspensions() = runTest {
+        val active = MutableStateFlow<String?>("first")
+        every { profileManager.active } returns active
+        val history = kotlinx.coroutines.CompletableDeferred<com.hermes.client.domain.TimelineSnapshot>()
+        coEvery { sessionRepo.historySnapshot("s1", "first") } coAnswers { history.await() }
+        val vm = buildVm()
+        vm.open("s1"); advanceUntilIdle()
+        active.value = "second"
+        history.complete(com.hermes.client.domain.TimelineSnapshot())
+        advanceUntilIdle()
+        coVerify { chatRepo.resumeSnapshot("s1", "first") }
+        coVerify(exactly = 0) { chatRepo.resumeSnapshot("s1", "second") }
+    }
+
+    @Test fun resume_failure_does_not_enable_send_or_erase_loaded_history() = runTest {
+        coEvery { sessionRepo.historySnapshot("s1", null) } returns com.hermes.client.domain.TimelineSnapshot().withAuthoredPrompt("loaded")
+        coEvery { chatRepo.resumeSnapshot("s1", null) } throws IllegalStateException("synthetic failure")
+        val vm = buildVm()
+        vm.open("s1"); advanceUntilIdle()
+        assertFalse(vm.state.value.timeline.ready)
+        assertEquals("loaded", com.hermes.client.domain.lastUserPrompt(vm.state.value.timeline))
+        vm.send("no"); advanceUntilIdle()
+        coVerify(exactly = 0) { chatRepo.submit(any(), any()) }
+    }
+
+    @Test fun old_reconnect_result_cannot_rebind_new_open() = runTest {
+        val old = kotlinx.coroutines.CompletableDeferred<com.hermes.client.data.network.ResumeDto>()
+        val vm = buildVm()
+        vm.open("A"); advanceUntilIdle()
+        coEvery { chatRepo.resumeSnapshot("A", null) } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { old.await() }
+        }
+        connectionStateFlow.value = ConnectionState.Reconnecting; advanceUntilIdle()
+        connectionStateFlow.value = ConnectionState.Connected; advanceUntilIdle()
+        vm.open("B"); advanceUntilIdle()
+        old.complete(com.hermes.client.data.network.ResumeDto(sessionId = "old-live"))
+        advanceUntilIdle()
+        vm.send("new"); advanceUntilIdle()
+        coVerify { chatRepo.submit("B", "new") }
+        coVerify(exactly = 0) { chatRepo.submit("old-live", any()) }
+    }
+
+    @Test fun old_resume_completing_last_does_not_rebind_or_stage_share_in_new_session() = runTest {
+        val old = kotlinx.coroutines.CompletableDeferred<com.hermes.client.data.network.ResumeDto>()
+        coEvery { chatRepo.resumeSnapshot("A", null) } coAnswers {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { old.await() }
+        }
+        pendingShareStore.put("A", com.hermes.client.share.PendingShare(imageBase64 = "YWJj", imageMime = "image/png"))
+        val vm = buildVm()
+        vm.open("A"); advanceUntilIdle()
+        vm.open("B"); advanceUntilIdle()
+        old.complete(com.hermes.client.data.network.ResumeDto(sessionId = "stale")); advanceUntilIdle()
+        assertTrue(vm.state.value.pendingAttachments.isEmpty())
+        vm.send("new"); advanceUntilIdle()
+        coVerify { chatRepo.submit("B", "new") }
+        coVerify(exactly = 0) { chatRepo.submit("stale", any()) }
+    }
+
+    @Test fun resume_unauthorized_sets_navigation_flag_and_keeps_ready_false() = runTest {
+        coEvery { chatRepo.resumeSnapshot("s1", null) } throws com.hermes.client.data.network.HermesApiException(401, "synthetic unauthorized")
+        val vm = buildVm()
+        vm.open("s1"); advanceUntilIdle()
+        assertTrue(vm.unauthorized.value)
+        assertFalse(vm.state.value.timeline.ready)
     }
 }

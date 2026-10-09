@@ -87,7 +87,11 @@ class HermesRestApi(
         get("/api/profiles/sessions?limit=$limit&order=recent${if (archivedOnly) "&archived=only" else ""}")
 
     suspend fun messages(sessionId: String, profile: String? = null): List<MessageDto> =
-        get<MessagesDto>("/api/sessions/$sessionId/messages${profileParam(profile, first = true)}").messages
+        messagePage(sessionId, profile).messages
+
+    /** Bounded active-row window; supplied array order is authoritative, even for latest pages. */
+    suspend fun messagePage(sessionId: String, profile: String? = null, offset: Int = 0): MessagesDto =
+        get("/api/sessions/$sessionId/messages?limit=500&order=latest&offset=$offset${profileParam(profile)}")
 
     /** "&profile=x" (or "?profile=x" when [first]) — empty when profile is null/blank. */
     private fun profileParam(profile: String?, first: Boolean = false): String {

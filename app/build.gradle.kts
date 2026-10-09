@@ -24,8 +24,8 @@ android {
         applicationId = "com.hermes.client"
         minSdk = 26
         targetSdk = 37
-        versionCode = 57
-        versionName = "0.1.52-drew.1"
+        versionCode = 58
+        versionName = "0.1.52-drew.2"
         testInstrumentationRunner = "com.hermes.client.HiltTestRunner"
         // App name; the beta build type overrides this so both can be installed at once.
         manifestPlaceholders["appLabel"] = "Hermes"
@@ -112,6 +112,11 @@ dependencies {
 
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
+    constraints {
+        // AGP aligns instrumentation with the tested app runtime; test core-ktx needs 1.2.0.
+        add("debugImplementation", libs.androidx.concurrent.futures.core)
+        add("debugImplementation", libs.androidx.concurrent.futures.ktx)
+    }
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
@@ -126,5 +131,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.hilt.testing)
     androidTestImplementation(libs.androidx.test.runner)
+    // Espresso 3.7 uses the supported InputManager lookup on Android 17/API 37.
+    androidTestImplementation(libs.androidx.test.espresso.core)
     kspAndroidTest(libs.hilt.compiler)
 }

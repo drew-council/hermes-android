@@ -57,7 +57,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
-import com.hermes.client.domain.ChatMessage
+import com.hermes.client.domain.*
+import androidx.compose.ui.input.nestedscroll.*
+import androidx.compose.ui.geometry.Offset
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.scrollBy as semanticScrollBy
+import androidx.compose.ui.semantics.scrollToIndex
 import com.hermes.client.domain.Role
 import com.hermes.client.domain.ToolCall
 import com.hermes.client.domain.ToolStatus
@@ -85,65 +92,54 @@ fun ChatMessageList(
     onReadAloud: (String) -> Unit = {},
     onStopReading: () -> Unit = {},
     highlightIndex: Int? = null,
+    following: Boolean = true,
+    onFollowingChange: (Boolean) -> Unit = {},
+    localSendRevision: Int = 0,
+    pendingRequests: List<com.hermes.client.data.network.PendingServerRequest> = emptyList(),
+    requestAnchors: Map<com.hermes.client.data.network.PendingServerRequest, String> = emptyMap(),
+    onLegacyApproval: suspend (ApprovalRequest, ApprovalChoice) -> Boolean = { _, _ -> false },
+    onRequestRespond: (com.hermes.client.data.network.PendingServerRequest, kotlinx.serialization.json.JsonObject) -> com.hermes.client.data.network.RespondOutcome = { _, _ -> com.hermes.client.data.network.RespondOutcome.STALE },
 ) {
-    val lastIndex = state.messages.lastIndex
-    // Only the most recent assistant turn can be regenerated — regenerating an earlier one
-    // would silently drop everything the user and agent said after it.
-    val lastAssistantId = state.messages.lastOrNull { it.role == Role.ASSISTANT }?.id
-    // Length of the last (streaming) message: changes on every delta so we follow the stream.
-    val tailLen = state.messages.lastOrNull()?.text?.length ?: 0
-
-    // On first load of a non-empty thread (opening an existing session), jump straight to the
-    // newest message so the latest reply is visible immediately — otherwise the list stays at
-    // the top and the most recent response looks missing until you scroll down by hand.
-    // Deliberately `remember` (not `rememberSaveable`) and keyed by sessionId: a config change
-    // like rotation recreates the composition, resets this to false, and re-lands at the bottom.
-    // With rememberSaveable it would survive rotation as `true` and skip the re-scroll, leaving
-    // the view mid-thread because the restored offset no longer maps to the bottom after the
-    // width reflow. Switching threads also re-lands (the key changes).
-    var landed by remember(sessionId) { mutableStateOf(false) }
-    LaunchedEffect(sessionId, state.messages.isNotEmpty()) {
-        if (state.messages.isEmpty() || landed) return@LaunchedEffect
-        // History loads after the list is already composed, so wait until the LazyColumn has
-        // actually measured the loaded items before scrolling — jumping before first layout
-        // lands short of the bottom.
-        snapshotFlow { listState.layoutInfo.totalItemsCount }
-            .filter { it >= state.messages.size }
-            .first()
-        // Mark landed before the convergence loop: if the user scrolls during the loop, scrollBy
-        // loses the MutatePriority race and throws CancellationException, cancelling this effect.
-        // Setting the flag first means an interrupted landing still ends in a consistent state and
-        // we never re-fight the user (the follow effect only re-scrolls when already at the bottom).
-        landed = true
-        // Converge to the ABSOLUTE bottom. Full-width assistant markdown measures lazily and can
-        // keep growing over several frames, so a single scroll pass under-shoots. Keep scrolling
-        // to the end each frame and only stop after a few consecutive frames with nothing left
-        // below — that catches late-measuring content without a fixed guess.
-        var stableFrames = 0
-        var guard = 0
-        while (guard++ < 90 && stableFrames < 3) {
-            if (listState.canScrollForward) {
-                listState.scrollBy(100_000f)
-                stableFrames = 0
-            } else {
-                stableFrames++
+    val entries = state.timeline.entries
+    val rendered = chatRenderItems(state.timeline, pendingRequests, requestAnchors)
+    val latestAssistantIndex = entries.indexOfLast {
+        (it.body as? TimelineBody.Message)?.role == Role.ASSISTANT || it.body is TimelineBody.PersistedRowDetails
+    }
+    val scrollScope = androidx.compose.runtime.rememberCoroutineScope()
+    val currentFollowing by androidx.compose.runtime.rememberUpdatedState(following)
+    val currentChange by androidx.compose.runtime.rememberUpdatedState(onFollowingChange)
+    val readerScroll = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) currentChange(false)
+                return Offset.Zero
             }
-            withFrameNanos {} // let a layout pass measure the next items, then continue
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && !listState.canScrollForward) currentChange(true)
+                return Offset.Zero
+            }
+        }
+    }
+    // Growth does not change reader intent. Layout observation covers disclosures, late
+    // Markdown measurement and IME resizing; ordinary scroll priority yields to user input.
+    LaunchedEffect(sessionId, following, state.timeline.revision, localSendRevision, state.messages.size, pendingRequests.size) {
+        if (!following) return@LaunchedEffect
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            Triple(layout.viewportEndOffset, layout.totalItemsCount,
+                layout.visibleItemsInfo.lastOrNull()?.let { it.key to (it.offset + it.size) })
+        }.collectLatest {
+            var stable = 0
+            repeat(90) {
+                if (!currentFollowing) return@collectLatest
+                if (listState.canScrollForward) { listState.scrollBy(100_000f); stable = 0 } else stable++
+                if (stable >= 3) return@collectLatest
+                withFrameNanos {}
+            }
         }
     }
 
-    // After the initial jump, follow new content. Always follow right after the user sends
-    // (they want to see their message and the reply); otherwise only when already near the
-    // bottom, so scrolling back through history isn't yanked away mid-stream.
-    LaunchedEffect(state.messages.size, tailLen) {
-        if (lastIndex < 0 || !landed) return@LaunchedEffect
-        val justSent = state.messages.lastOrNull()?.role == Role.USER
-        val visible = listState.layoutInfo.visibleItemsInfo
-        val atBottom = visible.isEmpty() || (visible.lastOrNull()?.index ?: 0) >= lastIndex - 1
-        if (justSent || atBottom) listState.animateScrollToItem(lastIndex)
-    }
-
-    if (state.messages.isEmpty()) {
+    if (entries.isEmpty() && state.messages.isEmpty() && pendingRequests.isEmpty()) {
         Box(modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
             Text(
                 "Send a message to start the conversation.",
@@ -154,30 +150,76 @@ fun ChatMessageList(
         return
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxSize().padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        // Key by position as well as id: the gateway reuses the model name as the
-        // message id across a session's turns, so ids are NOT guaranteed unique.
-        // The index makes the key collision-proof regardless of id source (the list
-        // is append-only, so an item's index is stable across recompositions).
-        itemsIndexed(
-            state.messages,
-            key = { index, msg -> "$index:${msg.id}" },
-        ) { index, msg ->
-            val canRegenerate = msg.id == lastAssistantId && !isGenerating
-            MessageBubble(
-                msg,
-                canRegenerate,
-                onEditResend,
-                onRegenerate,
-                isSpeaking,
-                onReadAloud,
-                onStopReading,
-                highlighted = index == highlightIndex,
-            )
+    Column(modifier.fillMaxSize()) {
+        if (!following) TextButton(onClick = { onFollowingChange(true) }) { Text("Jump to latest") }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp).nestedScroll(readerScroll).semantics {
+                semanticScrollBy { _, y ->
+                    currentChange(false)
+                    scrollScope.launch {
+                        listState.scrollBy(y)
+                        if (!listState.canScrollForward) currentChange(true)
+                    }
+                    true
+                }
+                scrollToIndex { index ->
+                    currentChange(false)
+                    scrollScope.launch { listState.scrollToItem(index) }
+                    true
+                }
+            },
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            itemsIndexed(rendered, key = { _, item -> when (item) {
+                is ChatRenderItem.Entry -> item.entry.key
+                is ChatRenderItem.Request -> "request:${item.request.generation}:${item.request.id}"
+            } }) { renderIndex, item ->
+                if (item is ChatRenderItem.Request) {
+                    ServerRequestCard(item.request, onRequestRespond, item.anchored)
+                } else if (item is ChatRenderItem.Entry) {
+                val entry = item.entry
+                val index = item.timelineIndex
+                when (val body = entry.body) {
+                    is TimelineBody.Message -> MessageBubble(
+                        ChatMessage(entry.key, body.role, body.content.text, isStreaming = body.streaming),
+                        index == latestAssistantIndex && !isGenerating,
+                        onEditResend, onRegenerate, isSpeaking, onReadAloud, onStopReading, renderIndex == highlightIndex,
+                    )
+                    is TimelineBody.Reasoning -> ThinkingCard(body.text)
+                    is TimelineBody.ToolInvocation -> TimelineToolCard(body.name, body.state.name.lowercase(), body.args?.toString().orEmpty())
+                    is TimelineBody.ToolResult -> TimelineToolCard(body.name ?: "Tool result", "result", body.result.text)
+                    is TimelineBody.Interaction -> {
+                        val modern = hasModernRequest(body, pendingRequests)
+                        val legacy = body.kind == "approval" && legacyApprovalAt(state.timeline, index, state.pendingApproval)
+                        val status = if (body.state == InteractionState.ANSWERED) "response sent" else
+                            if (modern || legacy) "pending" else "recorded · current status unavailable"
+                        Text("${body.kind}: $status · ${body.text}")
+                        if (!modern && body.state == InteractionState.PENDING) {
+                            if (body.kind == "approval" && legacyApprovalAt(state.timeline, index, state.pendingApproval))
+                                state.pendingApproval?.let { LegacyApprovalCard(it, state.timeline.ready, onLegacyApproval) }
+                            else Text("Legacy request unsupported · no compatible response transport")
+                        }
+                    }
+                    is TimelineBody.Notice -> Text(body.text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    is TimelineBody.PersistedRowDetails -> Column {
+                        Text("Stored row details · relative timing unavailable", style = MaterialTheme.typography.labelSmall)
+                        persistedReasoningDisclosures(body).forEach { disclosure ->
+                            androidx.compose.runtime.key(disclosure.field) {
+                                ThinkingCard(disclosure.text, label = "Thinking · ${disclosure.field}")
+                            }
+                        }
+                        MessageBubble(ChatMessage(entry.key, Role.ASSISTANT, body.content.text),
+                            index == latestAssistantIndex && !isGenerating, onEditResend, onRegenerate,
+                            isSpeaking, onReadAloud, onStopReading, renderIndex == highlightIndex)
+                    }
+                }
+                }
+            }
+            // Legacy-only callers do not establish timeline order.
+            if (entries.isEmpty()) itemsIndexed(state.messages, key = { index, msg -> "$index:${msg.id}" }) { index, msg ->
+                MessageBubble(msg, false, onEditResend, onRegenerate, isSpeaking, onReadAloud, onStopReading, index == highlightIndex)
+            }
         }
     }
 }
@@ -415,13 +457,24 @@ private fun TypingIndicator() {
 }
 
 @Composable
-private fun ThinkingCard(text: String) {
+private fun ThinkingCard(text: String, label: String = "Thinking") {
     var expanded by remember { mutableStateOf(false) }
     AssistChip(
         onClick = { expanded = !expanded },
-        label = { Text(if (expanded) "Hide thinking" else "Thinking") },
+        label = { Text(if (expanded) { if (label == "Thinking") "Hide thinking" else "Hide $label" } else label) },
     )
     if (expanded) Text(text, style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
+private fun TimelineToolCard(name: String, status: String, output: String) {
+    Surface(tonalElevation = 2.dp, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(10.dp)) {
+            Text("$name · $status", style = MaterialTheme.typography.labelMedium)
+            if (com.hermes.client.ui.theme.LocalToolCallTechnical.current && output.isNotBlank())
+                Text(output, style = MaterialTheme.typography.bodySmall, maxLines = 6)
+        }
+    }
 }
 
 @Composable

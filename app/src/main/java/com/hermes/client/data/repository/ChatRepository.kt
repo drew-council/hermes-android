@@ -2,6 +2,7 @@ package com.hermes.client.data.repository
 
 import com.hermes.client.data.network.ConnectionState
 import com.hermes.client.data.network.HermesGatewayClient
+import com.hermes.client.data.network.PendingServerRequest
 import com.hermes.client.data.network.ServerEvent
 import com.hermes.client.ui.chat.ApprovalChoice
 import kotlinx.coroutines.flow.SharedFlow
@@ -19,6 +20,19 @@ data class PathItem(val text: String, val display: String, val meta: String)
 class ChatRepository(private val client: HermesGatewayClient) {
     val events: SharedFlow<ServerEvent> get() = client.events
     val connectionState: StateFlow<ConnectionState> get() = client.connectionState
+
+    val pendingServerRequests get() = client.pendingServerRequests
+
+    /** Enable only after installing handlers for all transport-supported prompt methods. */
+    fun setServerRequestHandlerAvailable(available: Boolean) = client.setServerRequestHandlerAvailable(available)
+
+    fun respondServerRequest(request: PendingServerRequest, result: JsonObject) =
+        client.respondServerRequest(request, result)
+
+    fun failServerRequest(request: PendingServerRequest) = client.failServerRequest(request)
+
+    suspend fun lockServerClarification(request: PendingServerRequest, questionId: String, answer: String) =
+        client.lockServerClarification(request, questionId, answer)
 
     fun connect() = client.connect()
     fun disconnect() = client.close()
@@ -52,12 +66,16 @@ class ChatRepository(private val client: HermesGatewayClient) {
      * resume succeeds, the live handle it returns is profile-independent (resolved in-memory),
      * so only resume needs the profile.
      */
-    suspend fun resume(sessionId: String, profile: String? = null): String? {
+    suspend fun resume(sessionId: String, profile: String? = null): String? =
+        resumeSnapshot(sessionId, profile).sessionId
+
+    suspend fun resumeSnapshot(sessionId: String, profile: String? = null): com.hermes.client.data.network.ResumeDto {
         val result = client.call("session.resume", buildJsonObject {
             put("session_id", sessionId)
             if (!profile.isNullOrBlank()) put("profile", profile)
         })
-        return result.jsonObject["session_id"]?.jsonPrimitive?.content
+        return kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+            .decodeFromJsonElement(com.hermes.client.data.network.ResumeDto.serializer(), result)
     }
 
     suspend fun submit(sessionId: String, text: String) {
@@ -124,11 +142,12 @@ class ChatRepository(private val client: HermesGatewayClient) {
         })
     }
 
-    suspend fun respondApproval(sessionId: String, choice: ApprovalChoice) {
+    suspend fun respondApproval(sessionId: String, choice: ApprovalChoice, requestId: String? = null) {
         client.call("approval.respond", buildJsonObject {
             put("session_id", sessionId)
             put("choice", choice.wire)
             put("approved", choice != ApprovalChoice.DENY)
+            requestId?.let { put("request_id", it) }
         })
     }
 

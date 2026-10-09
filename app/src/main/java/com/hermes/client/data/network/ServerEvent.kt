@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -12,6 +13,7 @@ data class ServerEvent(
     val type: String,
     val sessionId: String?,
     val payload: JsonObject,
+    val seq: Long? = null,
 ) {
     companion object {
         fun from(params: JsonObject): ServerEvent {
@@ -19,7 +21,7 @@ data class ServerEvent(
             val payload = (params["payload"] as? JsonObject) ?: JsonObject(emptyMap())
             val sessionId = payload["session_id"]?.jsonPrimitive?.content
                 ?: params["session_id"]?.jsonPrimitive?.content
-            return ServerEvent(type, sessionId, payload)
+            return ServerEvent(type, sessionId, payload, (params["seq"] as? JsonPrimitive)?.longOrNull)
         }
     }
 }

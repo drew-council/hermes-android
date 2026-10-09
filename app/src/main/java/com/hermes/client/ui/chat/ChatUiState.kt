@@ -4,6 +4,7 @@ import com.hermes.client.data.network.ServerEvent
 import com.hermes.client.data.network.bool
 import com.hermes.client.data.network.str
 import com.hermes.client.data.network.strList
+import com.hermes.client.domain.*
 import com.hermes.client.domain.ChatMessage
 import com.hermes.client.domain.Role
 import com.hermes.client.domain.ToolCall
@@ -15,11 +16,16 @@ data class ApprovalRequest(
     val patternKeys: List<String>,
     val allowPermanent: Boolean,
     val smartDenied: Boolean = false,
+    val requestId: String? = null,
+    val allowSession: Boolean = false,
+    val choices: List<String> = emptyList(),
 )
 data class ClarifyRequest(val question: String, val options: List<String>, val requestId: String = "")
 
 data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
+    val timeline: TimelineSnapshot = TimelineSnapshot(),
+    val resumeSnapshot: com.hermes.client.data.network.ResumeDto? = null,
     val pendingApproval: ApprovalRequest? = null,
     val pendingClarify: ClarifyRequest? = null,
     val isGenerating: Boolean = false,
@@ -32,24 +38,19 @@ fun ChatUiState.withUserMessage(text: String): ChatUiState =
     copy(
         messages = messages + ChatMessage(id = "u-${messages.size}", role = Role.USER, text = text),
         isGenerating = true,
+        timeline = timeline.withAuthoredPrompt(text).copy(generating = true),
     )
 
 
 /** Pure reducer: folds one server event into the chat state. */
-fun ChatUiState.reduce(event: ServerEvent): ChatUiState {
+fun ChatUiState.reduce(event: ServerEvent): ChatUiState =
+    reduceLegacy(event).copy(timeline = timeline.reduceTimeline(event))
+
+private fun ChatUiState.reduceLegacy(event: ServerEvent): ChatUiState {
     val state = this
     // Targets the last STREAMING assistant message.
     fun mutateLastAssistant(block: (ChatMessage) -> ChatMessage): ChatUiState {
         val idx = state.messages.indexOfLast { it.role == Role.ASSISTANT && it.isStreaming }
-        if (idx < 0) return state
-        val updated = state.messages.toMutableList()
-        updated[idx] = block(updated[idx])
-        return state.copy(messages = updated)
-    }
-
-    // Targets the last assistant message regardless of streaming state.
-    fun mutateLastAssistantAny(block: (ChatMessage) -> ChatMessage): ChatUiState {
-        val idx = state.messages.indexOfLast { it.role == Role.ASSISTANT }
         if (idx < 0) return state
         val updated = state.messages.toMutableList()
         updated[idx] = block(updated[idx])
@@ -74,8 +75,8 @@ fun ChatUiState.reduce(event: ServerEvent): ChatUiState {
         "message.delta" -> mutateLastAssistant { it.copy(text = it.text + (event.str("text") ?: "")) }
         // Real reasoning arrives as reasoning.delta/reasoning.available (payload.text).
         // thinking.delta is only a transient spinner status, so it's ignored (else branch).
-        "reasoning.delta", "reasoning.available" ->
-            mutateLastAssistant { it.copy(thinking = it.thinking + (event.str("text") ?: "")) }
+        "reasoning.delta" -> mutateLastAssistant { it.copy(thinking = it.thinking + (event.str("text") ?: "")) }
+        "reasoning.available" -> mutateLastAssistant { it.copy(thinking = event.str("text") ?: it.thinking) }
         "message.complete" -> mutateLastAssistant {
             it.copy(text = (event.str("text") ?: event.str("rendered")) ?: it.text, isStreaming = false)
         }.copy(isGenerating = false)
@@ -86,10 +87,14 @@ fun ChatUiState.reduce(event: ServerEvent): ChatUiState {
                 status = ToolStatus.RUNNING,
             ))
         }
-        "tool.complete" -> mutateLastAssistantAny { msg ->
+        "tool.complete" -> {
             val tid = event.str("tool_id")
-            msg.copy(tools = msg.tools.map {
-                if (it.id == tid) it.copy(status = ToolStatus.DONE, output = event.str("result") ?: "") else it
+            val matches = state.messages.indices.filter { i -> state.messages[i].tools.any { it.id == tid } }
+            val idx = matches.singleOrNull()
+            if (idx == null) state else state.copy(messages = state.messages.mapIndexed { i, msg ->
+                if (i != idx) msg else msg.copy(tools = msg.tools.map { tool ->
+                    if (tool.id == tid) tool.copy(status = ToolStatus.DONE, output = event.str("result") ?: "") else tool
+                })
             })
         }
         "approval.request" -> state.copy(
@@ -100,6 +105,9 @@ fun ChatUiState.reduce(event: ServerEvent): ChatUiState {
                     .ifEmpty { event.str("pattern_key")?.let { listOf(it) } ?: emptyList() },
                 allowPermanent = event.bool("allow_permanent") ?: false,
                 smartDenied = event.bool("smart_denied") ?: false,
+                requestId = event.str("request_id"),
+                allowSession = event.bool("allow_session") ?: false,
+                choices = event.strList("choices"),
             ),
         )
         "clarify.request" -> state.copy(

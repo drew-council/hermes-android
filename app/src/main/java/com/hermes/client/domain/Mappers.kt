@@ -25,14 +25,18 @@ fun SessionDto.toDomain() = Session(
     gitRepoRoot = gitRepoRoot?.ifBlank { null },
 )
 
+/** Legacy single-row view. Rich history uses projectRestHistory, never this projection. */
+@Deprecated("Use projectRestHistory for ordered tools and assistant sidecars")
 fun MessageDto.toDomain() = ChatMessage(
     id = id?.toString() ?: "m-${hashCode()}",
     role = when (role.lowercase()) {
         "user" -> Role.USER
-        "assistant" -> Role.ASSISTANT
+        "assistant", "tool" -> Role.ASSISTANT
         else -> Role.SYSTEM
     },
-    text = content.orEmpty(),
+    text = if (role == "tool") "" else displayContent(displayContent ?: content).text,
+    tools = if (role == "tool") listOf(ToolCall(toolCallId ?: "unconfirmed-result", toolName ?: "tool",
+        ToolStatus.DONE, displayContent(displayContent ?: content).text)) else emptyList(),
 )
 
 fun ProjectTreeDto.toDomain() = ProjectTree(

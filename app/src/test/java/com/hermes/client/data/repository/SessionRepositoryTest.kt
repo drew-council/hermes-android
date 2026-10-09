@@ -48,4 +48,17 @@ class SessionRepositoryTest {
         )
         assertEquals(listOf("a-keep"), repo.archivedAllProfiles().map { it.id })
     }
+
+    @Test fun historySnapshot_retains_returned_identity_typed_tools_and_page_completeness() = runTest {
+        coEvery { rest.messagePage("requested", "p", 0) } returns com.hermes.client.data.network.MessagesDto(
+            sessionId = "tip", profile = "p", pagination = com.hermes.client.data.network.HistoryPaginationDto(returned = 500),
+            messages = listOf(com.hermes.client.data.network.MessageDto(77, "tool", kotlinx.serialization.json.JsonPrimitive("result"), toolCallId = "orphan")),
+        )
+        val snapshot = repo.historySnapshot("requested", "p")
+        assertEquals("tip", snapshot.completeness.resolvedSessionId)
+        assertEquals("history:p:tip:77:result", snapshot.entries.single().key)
+        org.junit.Assert.assertTrue(snapshot.entries.single().body is com.hermes.client.domain.TimelineBody.ToolResult)
+        org.junit.Assert.assertTrue(snapshot.completeness.mayHaveOlderRows)
+        org.junit.Assert.assertTrue(repo.history("requested", "p").isEmpty())
+    }
 }

@@ -96,7 +96,11 @@ fun ChatScreen(
     onMenu: () -> Unit = {},
     onUnauthorized: () -> Unit = {},
 ) {
-    LaunchedEffect(sessionId) { vm.open(sessionId) }
+    LaunchedEffect(sessionId) { vm.registerServerRequestRenderer(); vm.open(sessionId) }
+    val pendingRequests by vm.pendingServerRequests.collectAsStateWithLifecycle()
+    val liveSessionId by vm.liveSessionId.collectAsStateWithLifecycle()
+    var following by rememberSaveable(sessionId) { mutableStateOf(true) }
+    var localSendRevision by remember(sessionId) { mutableStateOf(0) }
     val state by vm.state.collectAsStateWithLifecycle()
     val connState by vm.connectionState.collectAsStateWithLifecycle()
     val unauthorized by vm.unauthorized.collectAsStateWithLifecycle()
@@ -120,7 +124,20 @@ fun ChatScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var currentMatch by rememberSaveable { mutableStateOf(0) }
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    val matches = remember(query, state.messages) { matchIndices(state.messages, query) }
+    val visibleRequests = pendingRequests.filter { it.sessionId == liveSessionId && state.timeline.ready }
+    val requestAnchors = remember(sessionId, liveSessionId) {
+        mutableMapOf<com.hermes.client.data.network.PendingServerRequest, String>()
+    }
+    visibleRequests.forEach { req ->
+        val existing = requestAnchors.entries.firstOrNull { it.key.id == req.id && it.key.generation == req.generation }?.value
+        if (existing != null) requestAnchors[req] = existing
+        else if (!req.replayed) requestAnchors[req] = state.timeline.entries.lastOrNull()?.key ?: "^start"
+    }
+    requestAnchors.keys.retainAll(visibleRequests.toSet())
+    val rendered = chatRenderItems(state.timeline, visibleRequests, requestAnchors)
+    val matches = rendered.mapIndexedNotNull { index, item ->
+        index.takeIf { query.isNotBlank() && item is ChatRenderItem.Entry && timelineSearchText(item.entry.body).contains(query, ignoreCase = true) }
+    }
     // Reset the cursor when the QUERY changes — not when `matches` changes: `matches` is a fresh
     // list instance on every streamed token, which would otherwise yank the cursor to 0 mid-search.
     LaunchedEffect(query, searchOpen) { currentMatch = 0 }
@@ -129,7 +146,7 @@ fun ChatScreen(
     val highlightIndex = if (searchOpen && matches.isNotEmpty()) matches[currentMatch.coerceAtMost(matches.lastIndex)] else null
     // Key the scroll on the resolved match index, so it only animates when the active match actually
     // moves — not on every streamed token (which changes `matches`'s identity but not the target).
-    LaunchedEffect(highlightIndex) { highlightIndex?.let { listState.animateScrollToItem(it) } }
+    LaunchedEffect(highlightIndex) { highlightIndex?.let { following = ChatScrollIntent(following).search().following; listState.animateScrollToItem(it) } }
     // System back closes the search bar first (rather than leaving the chat) when it's open.
     androidx.activity.compose.BackHandler(enabled = searchOpen) { searchOpen = false; query = "" }
     val focusRequester = remember { FocusRequester() }
@@ -152,12 +169,14 @@ fun ChatScreen(
         draft = base + text + (if (text.endsWith(":")) "" else " ")
     }
     val connected = connState is ConnectionState.Connected
-    val canSend = canSend(connected, draft.isNotBlank(), state.pendingAttachments.isNotEmpty(), state.isGenerating)
+    val canSend = state.timeline.ready && canSend(connected, draft.isNotBlank(), state.pendingAttachments.isNotEmpty(), state.isGenerating)
     val haptic = LocalHapticFeedback.current
 
     fun submit() {
         if (!canSend) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        following = ChatScrollIntent(following).latest().following
+        localSendRevision++
         vm.send(draft)
         draft = ""
     }
@@ -552,9 +571,16 @@ fun ChatScreen(
                         sessionId = sessionId,
                         listState = listState,
                         highlightIndex = highlightIndex,
+                        following = following,
+                        onFollowingChange = { following = ChatScrollIntent(following).readerScroll(it).following },
+                        localSendRevision = localSendRevision,
+                        pendingRequests = visibleRequests,
+                        requestAnchors = requestAnchors,
+                        onLegacyApproval = vm::respondLegacyApproval,
+                        onRequestRespond = vm::respondServerRequest,
                         isGenerating = state.isGenerating,
                         onEditResend = { text -> draft = text; focusRequester.requestFocus() },
-                        onRegenerate = { vm.regenerate() },
+                        onRegenerate = { following = true; localSendRevision++; vm.regenerate() },
                         isSpeaking = speaking,
                         onReadAloud = { vm.readAloud(it) },
                         onStopReading = { vm.stopReading() },
@@ -565,30 +591,6 @@ fun ChatScreen(
         }
     }
 
-    state.pendingApproval?.let { req ->
-        ApprovalSheet(
-            req = req,
-            onRespond = { vm.respondApproval(it) },
-            onDismiss = { /* keep pending: do nothing until the user chooses */ },
-        )
-    }
-
-    state.pendingClarify?.let { req ->
-        var answer by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { vm.clarify("") },
-            title = { Text("Clarification") },
-            text = {
-                Column {
-                    Text(req.question)
-                    OutlinedTextField(value = answer, onValueChange = { answer = it })
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { vm.clarify(answer) }) { Text("Send") }
-            },
-        )
-    }
 
     if (modelSheetOpen) {
         val items = com.hermes.client.ui.models.modelSelectorRows(
