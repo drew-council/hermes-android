@@ -6,6 +6,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import android.provider.Settings
+import com.hermes.client.data.network.localNetworkAccessAllowed
+import com.hermes.client.ui.setup.LocalNetworkPermissionScreen
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.Surface
@@ -51,40 +56,41 @@ class MainActivity : ComponentActivity() {
      */
     private var pendingRoute = mutableStateOf<String?>(null)
     private val newChatInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val localNetworkGranted = mutableStateOf(false)
+    private val localNetworkPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        localNetworkGranted.value = granted
+        if (granted) resumeGatewayAccess()
+    }
+
+    private fun hasLocalNetworkAccess(): Boolean {
+        if (Build.VERSION.SDK_INT < 37) return true
+        return localNetworkAccessAllowed(
+            Build.VERSION.SDK_INT,
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+
+    private fun requestLocalNetworkAccess() {
+        if (Build.VERSION.SDK_INT >= 37) {
+            localNetworkPermission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val dlData = intent?.data
-        if (dlData != null && isNewChatLink(dlData.toString())) {
-            openNewChat()
-            intent?.data = null
+        localNetworkGranted.value = hasLocalNetworkAccess()
+        if (localNetworkGranted.value) {
+            resumeGatewayAccess()
         } else {
-            pendingRoute.value = intent?.getStringExtra("extra_route")
-                ?: dlData?.let { deepLinkRouteFor(it.toString()) }
-            intent?.removeExtra("extra_route")
-            intent?.data = null
+            // Android 17 drops LAN packets until this runtime permission is granted.
+            // Do not start REST/WS requests, shares, or notification connections beforehand.
+            requestLocalNetworkAccess()
         }
-        handleShare(intent)
         val hasConfig = credentialStore.load() != null
         val crashReport = CrashReporter.read(this)
-        // Resume the notification service if the user previously enabled it.
-        // lifecycleScope (not a bare MainScope) so the coroutine is cancelled with the activity
-        // instead of leaking on every recreation.
-        lifecycleScope.launch {
-            if (notificationSettings.prefs.first().enabled) {
-                // On API 33+ the service posts notifications and needs POST_NOTIFICATIONS at
-                // runtime; if it isn't granted (e.g. revoked since last enable), don't auto-start
-                // — the Settings screen re-requests the permission the next time it's enabled.
-                val canStart = Build.VERSION.SDK_INT < 33 ||
-                    ContextCompat.checkSelfPermission(
-                        this@MainActivity,
-                        Manifest.permission.POST_NOTIFICATIONS,
-                    ) == PackageManager.PERMISSION_GRANTED
-                if (canStart) {
-                    com.hermes.client.notifications.GatewayConnectionService.start(this@MainActivity)
-                }
-            }
-        }
         setContent {
             val mode by settingsStore.themeMode.collectAsState(initial = ThemeMode.SYSTEM)
             val technical by settingsStore.toolCallTechnical.collectAsState(initial = true)
@@ -107,7 +113,17 @@ class MainActivity : ComponentActivity() {
                             // shared, then continue into the app once dismissed.
                             var report by remember { mutableStateOf(crashReport) }
                             val current = report
-                            if (current != null) {
+                            if (!localNetworkGranted.value) {
+                                LocalNetworkPermissionScreen(
+                                    onRequest = { requestLocalNetworkAccess() },
+                                    onSettings = {
+                                        startActivity(Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:$packageName"),
+                                        ))
+                                    },
+                                )
+                            } else if (current != null) {
                                 CrashReportScreen(
                                     report = current,
                                     onShare = { shareCrash(current) },
@@ -131,6 +147,35 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (localNetworkGranted.value && hasLocalNetworkAccess()) handleGatewayIntent(intent)
+        // Otherwise retain the intent until the permission grant/settings return.
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val allowed = hasLocalNetworkAccess()
+        val previouslyAllowed = localNetworkGranted.value
+        localNetworkGranted.value = allowed
+        if (allowed && !previouslyAllowed) resumeGatewayAccess()
+    }
+
+    private fun resumeGatewayAccess() {
+        handleGatewayIntent(intent)
+        lifecycleScope.launch {
+            if (notificationSettings.prefs.first().enabled) {
+                val canStart = Build.VERSION.SDK_INT < 33 ||
+                    ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        Manifest.permission.POST_NOTIFICATIONS,
+                    ) == PackageManager.PERMISSION_GRANTED
+                if (canStart) {
+                    com.hermes.client.notifications.GatewayConnectionService.start(this@MainActivity)
+                }
+            }
+        }
+    }
+
+    private fun handleGatewayIntent(intent: Intent) {
         val dlData = intent.data
         if (dlData != null && isNewChatLink(dlData.toString())) {
             openNewChat()

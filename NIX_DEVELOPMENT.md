@@ -4,7 +4,7 @@ This flake follows [drew-council/nix-project-template](https://github.com/drew-c
 
 ```sh
 nix develop
-./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon
+./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon
 nix fmt
 nix flake check
 ```
