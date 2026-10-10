@@ -50,11 +50,26 @@ class ChatViewModel @Inject constructor(
 
     // Registration describes installed handlers, not the visibility of a card.
     fun registerServerRequestRenderer() = chat.setServerRequestHandlerAvailable(true)
+    private val _serverRequestStatus = MutableStateFlow<String?>(null)
+    val serverRequestStatus: StateFlow<String?> = _serverRequestStatus.asStateFlow()
+    fun dismissServerRequestStatus() { _serverRequestStatus.value = null }
+
     fun respondServerRequest(request: com.hermes.client.data.network.PendingServerRequest,
                              result: kotlinx.serialization.json.JsonObject): com.hermes.client.data.network.RespondOutcome {
-        if (request.sessionId != sessionId || _liveSessionId.value != sessionId || !_state.value.timeline.ready)
-            return com.hermes.client.data.network.RespondOutcome.STALE
-        val outcome = chat.respondServerRequest(request, result)
+        val outcome = when {
+            request.sessionId != sessionId || _liveSessionId.value != sessionId -> com.hermes.client.data.network.RespondOutcome.STALE
+            connectionState.value !is ConnectionState.Connected -> com.hermes.client.data.network.RespondOutcome.DISCONNECTED
+            !_state.value.timeline.ready -> com.hermes.client.data.network.RespondOutcome.STALE
+            else -> chat.respondServerRequest(request, result)
+        }
+        // Ephemeral UI feedback survives queue removal, never enters the transcript or saved state.
+        _serverRequestStatus.value = when (outcome) {
+            com.hermes.client.data.network.RespondOutcome.ENQUEUED ->
+                if (result["value"] == kotlinx.serialization.json.JsonPrimitive("")) "Request skipped (not acknowledged)"
+                else "Response sent (not acknowledged)"
+            com.hermes.client.data.network.RespondOutcome.STALE -> "Request expired or replaced · answer discarded"
+            com.hermes.client.data.network.RespondOutcome.DISCONNECTED -> "Disconnected · answer discarded"
+        }
         if (outcome == com.hermes.client.data.network.RespondOutcome.ENQUEUED && request.sessionId == sessionId) {
             val queueId = (request.params["request_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content
             _state.update { state ->
@@ -152,6 +167,7 @@ class ChatViewModel @Inject constructor(
         connJob?.cancel()
         sessionId = id
         _liveSessionId.value = null
+        _serverRequestStatus.value = null
         _ownerProfile.value = ownerProfile
         _state.value = ChatUiState.empty()
         _initialDraft.value = null
@@ -335,7 +351,7 @@ class ChatViewModel @Inject constructor(
                     runCatching { chat.attachImageBytes(handle, b64, a.mimeType) }
                         .onFailure {
                             if (it is CancellationException) throw it
-                            if (owner == epoch) appendError("Attach failed: ${it.message}")
+                            if (owner == epoch) appendError("Attach failed (${sessionFailureStatus("attach", it)})")
                         }
                 }
                 // A leading "/" is a slash command — execute it (the gateway strips the slash)
@@ -345,7 +361,7 @@ class ChatViewModel @Inject constructor(
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
                 // A gateway error (e.g. "session not found") must surface, not crash the app.
-                if (owner == epoch) appendError(e.message ?: "Failed to send message")
+                if (owner == epoch) appendError("Couldn't send message (${sessionFailureStatus("send", e)})")
             }
         }
     }

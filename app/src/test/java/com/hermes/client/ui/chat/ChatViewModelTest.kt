@@ -63,6 +63,7 @@ class ChatViewModelTest {
     }
 
     @Test fun private_request_response_never_enters_chat_and_registration_is_explicit() = runTest {
+        connectionStateFlow.value = ConnectionState.Connected
         val vm = buildVm()
         vm.registerServerRequestRenderer()
         io.mockk.verify { chatRepo.setServerRequestHandlerAvailable(true) }
@@ -77,6 +78,7 @@ class ChatViewModelTest {
         assertEquals(before.timeline.entries, vm.state.value.timeline.entries)
         assertEquals(before.messages, vm.state.value.messages)
         assertFalse(vm.state.value.toString().contains("SYNTHETIC_PRIVATE_CANARY"))
+        assertEquals("Response sent (not acknowledged)", vm.serverRequestStatus.value)
         io.mockk.verify(exactly = 1) { chatRepo.respondServerRequest(request, result) }
     }
 

@@ -2,6 +2,8 @@ package com.hermes.client.ui
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.navigation.compose.composable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -63,6 +65,10 @@ class ChatGatewayLifecycleUiTest {
                                 }
                                 "prompt.submit" -> {
                                     check(params["session_id"] == JsonPrimitive("live"))
+                                    if (failure == "ownership") {
+                                        ws.send("""{"jsonrpc":"2.0","id":${rpc["id"]},"error":{"code":4090,"message":"synthetic private detail","data":{"reason":"SESSION_NOT_OWNED"}}}""")
+                                        return
+                                    }
                                     persisted = true
                                     reply("{\"status\":\"started\"}")
                                     ws.send("""{"jsonrpc":"2.0","method":"event","params":{"type":"message.start","session_id":"live","payload":{}}}""")
@@ -150,6 +156,7 @@ class ChatGatewayLifecycleUiTest {
             val reply = backend.calls.single { it["id"] == JsonPrimitive("fixture-code") }
             assertEquals(buildJsonObject { put("value", "123456") }, reply["result"])
             assertTrue(vm.pendingServerRequests.value.isEmpty())
+            rule.onNodeWithText("Response sent (not acknowledged)").assertIsDisplayed()
             assertFalse(vm.state.value.messages.any { it.text.contains("123456") || it.text.contains("Synthetic verification fixture") })
             assertFalse(vm.state.value.timeline.entries.any { (it.body as? TimelineBody.Message)?.content?.text?.contains("123456") == true })
             assertTrue(backend.calls.filter { it["method"] == JsonPrimitive("session.resume") }.all { it["params"]!!.jsonObject["profile"] == JsonPrimitive("fixture") })
@@ -159,6 +166,7 @@ class ChatGatewayLifecycleUiTest {
             val other = vm.pendingServerRequests.value.single()
             rule.onNodeWithText("other.invalid", substring = true).assertDoesNotExist()
             assertEquals(RespondOutcome.STALE, vm.respondServerRequest(other, buildJsonObject { put("value", "123456") }))
+            rule.onNodeWithText("Request expired or replaced · answer discarded").assertIsDisplayed()
             assertFalse(backend.calls.any { it["id"] == JsonPrimitive("other-session-code") })
             // Disposal of an unanswered request must not fabricate an empty answer.
             backend.socket!!.send("""{"jsonrpc":"2.0","id":"dispose-code","method":"vault.code","params":{"session_id":"live","site":"synthetic.invalid"}}""")
@@ -225,6 +233,77 @@ class ChatGatewayLifecycleUiTest {
             assertTrue(backend.calls.filter { it["method"] == JsonPrimitive("session.resume") }.all { it["params"]!!.jsonObject["profile"] == JsonPrimitive("fixture") })
             gateway.cancelNow()
             http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
+        }
+        scope.cancel()
+    }
+
+    @Test fun blank_and_separator_code_send_are_blocked_skip_is_explicit() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        Backend().use { backend ->
+            val http = OkHttpClient()
+            val json = Json { ignoreUnknownKeys = true }
+            val rest = HermesRestApi(http, json) { GatewayConfig(backend.server.url("/").toString()) }
+            val gateway = HermesGatewayClient(http, json, scope, wsUrlProvider = { backend.server.url("/ws").toString() })
+            val chat = ChatRepository(gateway)
+            val profiles = ProfileRepository(rest)
+            val manager = ProfileManager(profiles)
+            manager.refresh()
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val tts = object : TextToSpeechController {
+                override val speaking = MutableStateFlow(false)
+                override fun speak(text: String) = Unit
+                override fun stop() = Unit
+            }
+            val vm = ChatViewModel(chat, SessionRepository(rest), ModelRepository(rest), profiles, manager,
+                ModelFavoritesStore(context), com.hermes.client.share.PendingShareStore(), tts,
+                PromptStore(context), ConfigRepository(rest))
+            gateway.connect()
+            val key = chat.createSession("fixture")
+            val showing = mutableStateOf(true)
+            rule.setContent { HermesTheme { if (showing.value) ChatScreen(key, ownerProfile = "fixture", vm = vm) } }
+            rule.waitUntil(5000) { vm.state.value.timeline.ready && vm.liveSessionId.value == "live" }
+
+            backend.socket!!.send("""{"jsonrpc":"2.0","id":"blank-code","method":"vault.code","params":{"session_id":"live","site":"synthetic.invalid"}}""")
+            rule.waitUntil(5000) { vm.pendingServerRequests.value.size == 1 }
+            val field = rule.onNodeWithContentDescription("Enter verification code")
+            field.performScrollTo().assertIsDisplayed().assertHeightIsAtLeast(56.dp)
+            rule.onNodeWithText("Send privately").performScrollTo().assertIsNotEnabled()
+            java.io.File(context.cacheDir, "verification-input-synthetic.png").outputStream().use {
+                rule.onRoot().captureToImage().asAndroidBitmap().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            assertFalse(backend.calls.any { it["id"] == JsonPrimitive("blank-code") })
+            assertEquals(1, vm.pendingServerRequests.value.size)
+            field.performScrollTo().performTextInput(" - \u2003-- ")
+            rule.onNodeWithText("Send privately").assertIsNotEnabled()
+            assertFalse(backend.calls.any { it["id"] == JsonPrimitive("blank-code") })
+            field.performTextReplacement("123 456")
+            val click = rule.onNodeWithText("Send privately").fetchSemanticsNode().config[androidx.compose.ui.semantics.SemanticsActions.OnClick].action!!
+            field.performTextClearance()
+            // Invoke the captured callback despite disabled UI: it must recheck live input state.
+            rule.runOnIdle { click() }
+            assertFalse(backend.calls.any { it["id"] == JsonPrimitive("blank-code") })
+            assertEquals(1, vm.pendingServerRequests.value.size)
+            rule.onNodeWithText("Enter the requested input before sending").performScrollTo().assertIsDisplayed()
+            rule.onNodeWithText("Skip").performScrollTo().performClick()
+            rule.waitUntil(5000) { backend.calls.any { it["id"] == JsonPrimitive("blank-code") } }
+            assertEquals(buildJsonObject { put("value", "") }, backend.calls.single { it["id"] == JsonPrimitive("blank-code") }["result"])
+            assertTrue(vm.pendingServerRequests.value.isEmpty())
+            rule.onNodeWithText("Request skipped (not acknowledged)").assertIsDisplayed()
+            assertFalse(vm.state.value.messages.any { it.text.contains("Request skipped") })
+            backend.failure = "ownership"
+            rule.onNodeWithText("Message Hermes…").performTextInput("synthetic refused turn")
+            rule.onNodeWithContentDescription("Send").performClick()
+            rule.waitUntil(5000) { vm.state.value.timeline.entries.any { (it.body as? TimelineBody.Notice)?.text?.contains("send: RPC 4090 · session owned by another live client") == true } }
+            assertFalse(vm.state.value.messages.any { it.text.contains("synthetic private detail") })
+            backend.socket!!.send("""{"jsonrpc":"2.0","id":"disconnect-code","method":"vault.code","params":{"session_id":"live"}}""")
+            rule.waitUntil(5000) { vm.pendingServerRequests.value.size == 1 }
+            val disconnected = vm.pendingServerRequests.value.single()
+            gateway.cancelNow()
+            assertEquals(RespondOutcome.DISCONNECTED, vm.respondServerRequest(disconnected, buildJsonObject { put("value", "123456") }))
+            rule.onNodeWithText("Disconnected · answer discarded").assertIsDisplayed()
+            assertFalse(backend.calls.any { it["id"] == JsonPrimitive("disconnect-code") })
+            rule.runOnIdle { showing.value = false }
+            gateway.cancelNow(); http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
         }
         scope.cancel()
     }

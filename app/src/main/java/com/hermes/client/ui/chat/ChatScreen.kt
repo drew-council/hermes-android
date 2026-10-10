@@ -73,6 +73,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -99,6 +101,7 @@ fun ChatScreen(
 ) {
     LaunchedEffect(sessionId, ownerProfile) { vm.registerServerRequestRenderer(); vm.open(sessionId, ownerProfile) }
     val pendingRequests by vm.pendingServerRequests.collectAsStateWithLifecycle()
+    val serverRequestStatus by vm.serverRequestStatus.collectAsStateWithLifecycle()
     val liveSessionId by vm.liveSessionId.collectAsStateWithLifecycle()
     var following by rememberSaveable(sessionId) { mutableStateOf(true) }
     var localSendRevision by remember(sessionId) { mutableStateOf(0) }
@@ -484,6 +487,14 @@ fun ChatScreen(
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (!connected) {
                 ConnectionBanner(connState, onRetry = { vm.reconnect() })
+            }
+            serverRequestStatus?.let { status ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite },
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    TextButton(onClick = vm::dismissServerRequestStatus) { Text("Dismiss status") }
+                }
             }
             if (slashMatches.isNotEmpty()) {
                 // Typing "/" turns the message area into a full, scrollable command picker.

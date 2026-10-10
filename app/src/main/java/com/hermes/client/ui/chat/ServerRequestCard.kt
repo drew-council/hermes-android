@@ -1,6 +1,5 @@
 package com.hermes.client.ui.chat
 
-import androidx.compose.foundation.text.BasicSecureTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.TextObfuscationMode
@@ -10,6 +9,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.hermes.client.data.network.PendingServerRequest
 import com.hermes.client.data.network.RespondOutcome
 import com.hermes.client.ui.components.SlideToConfirm
@@ -21,6 +22,10 @@ internal fun approvalChoices(params: JsonObject): List<String> =
         it == "deny" || it == "once" || (it == "session" && params["allow_session"] != JsonPrimitive(false) && params["smart_denied"] != JsonPrimitive(true)) ||
             (it == "always" && params["allow_permanent"] != JsonPrimitive(false) && params["smart_denied"] != JsonPrimitive(true))
     }.orEmpty()
+
+/** Verification codes need a token, not just separators; genuine secrets are sent verbatim. */
+internal fun privateInputPresent(method: String, value: CharSequence): Boolean =
+    if (method == "vault.code") value.any { it.isLetterOrDigit() } else value.isNotEmpty()
 
 /** Transient drafts are scoped to the exact transport handle, not its reusable wire label.
  * Secure fields disable copy/cut and keyboard learning; nothing is saved or fed to chat.
@@ -117,11 +122,18 @@ fun ServerRequestCard(request: PendingServerRequest,
                         })
                         Text("Private input · sent directly, never added to chat", style = MaterialTheme.typography.labelSmall)
                         if (request.method == "vault.save_login") {
-                            Text("Identifier")
-                            PrivateInput(identifier, !settled)
+                            PrivateInput(identifier, !settled, "Identifier")
                         }
-                        PrivateInput(secret, !settled)
-                        TextButton(enabled = !settled, onClick = {
+                        val label = if (request.method == "vault.code") "Enter verification code" else "Private secret"
+                        PrivateInput(secret, !settled, label)
+                        TextButton(enabled = !settled && privateInputPresent(request.method, secret.text) &&
+                            (request.method != "vault.save_login" || identifier.text.isNotEmpty()), onClick = {
+                            // Recheck the transient state in the callback; an empty Send is never Skip.
+                            if (!privateInputPresent(request.method, secret.text) ||
+                                (request.method == "vault.save_login" && identifier.text.isEmpty())) {
+                                status = "Enter the requested input before sending"
+                                return@TextButton
+                            }
                             val value = if (request.method == "vault.save_login") buildJsonObject {
                                 put("identifier", identifier.text.toString()); put("password", secret.text.toString())
                             }.toString() else secret.text.toString()
@@ -136,11 +148,13 @@ fun ServerRequestCard(request: PendingServerRequest,
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PrivateInput(state: TextFieldState, enabled: Boolean) {
-    BasicSecureTextField(state = state, enabled = enabled, textObfuscationMode = TextObfuscationMode.Hidden,
+private fun PrivateInput(state: TextFieldState, enabled: Boolean, label: String) {
+    OutlinedSecureTextField(state = state, enabled = enabled,
+        label = { Text(label) }, textObfuscationMode = TextObfuscationMode.Hidden,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        modifier = Modifier.fillMaxWidth().padding(8.dp))
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).semantics { contentDescription = label })
 }
 
 @Composable

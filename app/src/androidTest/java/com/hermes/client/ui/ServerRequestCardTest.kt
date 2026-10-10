@@ -42,7 +42,9 @@ class ServerRequestCardTest {
         rule.setContent { HermesTheme { if (shown.value) ServerRequestCard(req.value, { _, result -> sent.add(result); RespondOutcome.ENQUEUED }) } }
         rule.onNode(hasSetTextAction()).performTextInput("SYNTHETIC_OLD_CODE")
         rule.runOnIdle { req.value = request("new") }
-        rule.onNodeWithText("Send privately").performClick()
+        rule.onNodeWithText("Send privately").assertIsNotEnabled()
+        rule.runOnIdle { assertTrue(sent.isEmpty()) }
+        rule.onNodeWithText("Skip").performClick()
         rule.runOnIdle {
             assertEquals(JsonPrimitive(""), sent.single()["value"])
             shown.value = false

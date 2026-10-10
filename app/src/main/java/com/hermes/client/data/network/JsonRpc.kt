@@ -22,7 +22,9 @@ data class RpcRequest(val id: Long, val method: String, val params: JsonObject) 
     }
 }
 
-data class RpcError(val code: Int, val message: String)
+enum class GatewayRefusalReason { SESSION_NOT_OWNED, MAX_CONCURRENT_SESSIONS, SESSION_COORDINATION_UNAVAILABLE }
+
+data class RpcError(val code: Int, val message: String, val reason: GatewayRefusalReason? = null)
 
 sealed interface RpcInbound
 data class RpcResult(val id: Long, val result: JsonElement) : RpcInbound
@@ -52,6 +54,11 @@ fun parseInbound(json: Json, line: String): RpcInbound {
             RpcError(
                 code = e["code"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
                 message = e["message"]?.jsonPrimitive?.content ?: "error",
+                // Whitelisted machine-readable reasons only; never expose arbitrary server text/data.
+                reason = if ((e["code"] as? JsonPrimitive)?.content == "4090") {
+                    val reason = ((e["data"] as? JsonObject)?.get("reason") as? JsonPrimitive)?.content
+                    GatewayRefusalReason.entries.firstOrNull { it.name == reason }
+                } else null,
             ),
         )
     }

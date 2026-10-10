@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.math.pow
 
-class GatewayRpcException(val code: Int, message: String) : Exception(message)
+class GatewayRpcException(val code: Int, message: String, val reason: GatewayRefusalReason? = null) : Exception(message)
 
 data class BackoffPolicy(
     val baseMs: Long = 500,
@@ -252,7 +252,7 @@ open class HermesGatewayClient(
                     is RpcErrorReply -> {
                         if (!capabilityIds.remove(msg.id)) {
                             DebugLog.log("ws", "rpc#${msg.id} error ${msg.error.code}")
-                            pending.remove(msg.id)?.completeExceptionally(GatewayRpcException(msg.error.code, "Gateway RPC failed"))
+                            pending.remove(msg.id)?.completeExceptionally(GatewayRpcException(msg.error.code, "Gateway RPC failed", msg.error.reason))
                         }
                     }
                     is RpcEvent -> {
