@@ -92,11 +92,12 @@ import com.hermes.client.ui.components.connectionLabel
 @Composable
 fun ChatScreen(
     sessionId: String,
+    ownerProfile: String? = null,
     vm: ChatViewModel = hiltViewModel(),
     onMenu: () -> Unit = {},
     onUnauthorized: () -> Unit = {},
 ) {
-    LaunchedEffect(sessionId) { vm.registerServerRequestRenderer(); vm.open(sessionId) }
+    LaunchedEffect(sessionId, ownerProfile) { vm.registerServerRequestRenderer(); vm.open(sessionId, ownerProfile) }
     val pendingRequests by vm.pendingServerRequests.collectAsStateWithLifecycle()
     val liveSessionId by vm.liveSessionId.collectAsStateWithLifecycle()
     var following by rememberSaveable(sessionId) { mutableStateOf(true) }

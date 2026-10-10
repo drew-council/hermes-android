@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonObject
 @Serializable data class ResumeDto(
     @SerialName("session_id") val sessionId: String? = null,
     @SerialName("session_key") val sessionKey: String? = null,
+    @SerialName("stored_session_id") val storedSessionId: String? = null,
     val messages: List<ResumeMessageDto> = emptyList(),
     @SerialName("messages_omitted") val messagesOmitted: Boolean = false,
     val running: Boolean = false, val inflight: InflightDto? = null,

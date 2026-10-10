@@ -51,8 +51,10 @@ class ChatRepository(private val client: HermesGatewayClient) {
         val result = client.call("session.create", buildJsonObject {
             if (!profile.isNullOrBlank()) put("profile", profile)
         })
-        return result.jsonObject["session_id"]?.jsonPrimitive?.content
-            ?: error("session.create returned no id")
+        // Navigation and REST use the durable key, not the temporary prompt/event handle.
+        return result.jsonObject["stored_session_id"]?.jsonPrimitive?.content
+            ?.takeIf { it.isNotBlank() }
+            ?: error("session.create returned no stored id")
     }
 
     /**

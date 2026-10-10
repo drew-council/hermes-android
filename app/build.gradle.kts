@@ -24,8 +24,8 @@ android {
         applicationId = "com.hermes.client"
         minSdk = 26
         targetSdk = 37
-        versionCode = 58
-        versionName = "0.1.52-drew.2"
+        versionCode = 59
+        versionName = "0.1.52-drew.3"
         testInstrumentationRunner = "com.hermes.client.HiltTestRunner"
         // App name; the beta build type overrides this so both can be installed at once.
         manifestPlaceholders["appLabel"] = "Hermes"
@@ -127,6 +127,7 @@ dependencies {
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.hilt.testing)

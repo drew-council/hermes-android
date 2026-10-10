@@ -190,7 +190,7 @@ fun HermesNav(hasConfig: Boolean, deepLinkRoute: String? = null, onDeepLinkConsu
             // ---- Tab roots ----
             composable("sessions") {
                 SessionsScreen(
-                    onOpen = { id -> nav.navigate("chat/$id") },
+                    onOpen = { route -> nav.navigate(route) },
                     onOpenArchived = { nav.navigate("archived") },
                     onUnauthorized = onUnauthorized,
                 )
@@ -201,14 +201,19 @@ fun HermesNav(hasConfig: Boolean, deepLinkRoute: String? = null, onDeepLinkConsu
             // ---- Pushed screens (back arrow) ----
             composable("archived") {
                 com.hermes.client.ui.sessions.ArchivedSessionsScreen(
-                    onOpen = { id -> nav.navigate("chat/$id") },
+                    onOpen = { route -> nav.navigate(route) },
                     onBack = back,
                     onUnauthorized = onUnauthorized,
                 )
             }
-            composable("chat/{id}") { entry ->
+            composable(CHAT_ROUTE_PATTERN, arguments = listOf(androidx.navigation.navArgument("profile") {
+                type = androidx.navigation.NavType.StringType
+                nullable = true
+                defaultValue = null
+            })) { entry ->
                 ChatScreen(
                     sessionId = entry.arguments?.getString("id") ?: "",
+                    ownerProfile = entry.arguments?.getString("profile"),
                     onMenu = back,
                     onUnauthorized = onUnauthorized,
                 )
@@ -281,7 +286,7 @@ fun HermesNav(hasConfig: Boolean, deepLinkRoute: String? = null, onDeepLinkConsu
             composable("session_admin") {
                 SessionAdminScreen(
                     onMenu = back,
-                    onOpen = { id -> nav.navigate("chat/$id") },
+                    onOpen = { id -> nav.navigate(chatRoute(id)) },
                 )
             }
             composable("agents_tools") { AgentsToolsScreen(onMenu = back) }

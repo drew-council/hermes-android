@@ -55,7 +55,7 @@ class ActivityModelsTest {
             messageCount = 3, profile = "personal", lastActive = now,
         )
         val items = sessionsToActivity(listOf(s))
-        assertEquals("chat/s1", items.single().route)
+        assertEquals("chat/s1?profile=personal", items.single().route)
         assertEquals(ActivityKind.CONVERSATION, items.single().kind)
         assertEquals(now, items.single().timestampMs)
         assertTrue(items.single().subtitle!!.contains("3 msg"))
@@ -70,7 +70,7 @@ class ActivityModelsTest {
         )
         val item = sessionsToActivity(listOf(s)).single()
         assertEquals(ActivityKind.CRON, item.kind)
-        assertEquals("chat/run9", item.route)
+        assertEquals("chat/run9?profile=personal", item.route)
         assertTrue(item.subtitle!!.contains("Cron run"))
     }
 

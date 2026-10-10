@@ -210,12 +210,18 @@ class SessionsViewModel @Inject constructor(
     }
 
     /** Returns the new session id, or null if creation failed (so the UI doesn't crash). */
-    suspend fun createSession(): String? =
-        runCatching { chat.createSession(profileManager.active.value) }
+    suspend fun createSession(profile: String? = profileManager.active.value): String? =
+        runCatching { chat.createSession(profile) }
             // runCatching also catches CancellationException — rethrow it so cancelling the caller
             // isn't swallowed and mistaken for a failed creation.
             .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
             .getOrNull()
+
+    suspend fun createSessionRoute(): String? {
+        profileManager.refresh()
+        val profile = profileManager.active.value
+        return createSession(profile)?.let { com.hermes.client.ui.nav.chatRoute(it, profile) }
+    }
 
     fun rename(session: Session, title: String) = viewModelScope.launch {
         runCatching { sessions.rename(session.id, title, session.profile) }.onSuccess { refresh() }

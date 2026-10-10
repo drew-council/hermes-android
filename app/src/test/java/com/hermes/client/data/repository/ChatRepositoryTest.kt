@@ -30,7 +30,7 @@ class ChatRepositoryTest {
     // is invisible in both the Android and Desktop apps. session.create MUST carry the active profile.
     @Test fun createSession_passes_active_profile() = runTest {
         val client = mockk<HermesGatewayClient>(relaxed = true)
-        coEvery { client.call(any(), any()) } returns buildJsonObject { put("session_id", "abc") }
+        coEvery { client.call(any(), any()) } returns buildJsonObject { put("session_id", "temporary"); put("stored_session_id", "abc") }
         val repo = ChatRepository(client)
 
         val id = repo.createSession(profile = "acme")
@@ -41,7 +41,7 @@ class ChatRepositoryTest {
 
     @Test fun createSession_omits_blank_profile() = runTest {
         val client = mockk<HermesGatewayClient>(relaxed = true)
-        coEvery { client.call(any(), any()) } returns buildJsonObject { put("session_id", "abc") }
+        coEvery { client.call(any(), any()) } returns buildJsonObject { put("session_id", "temporary"); put("stored_session_id", "abc") }
         val repo = ChatRepository(client)
 
         repo.createSession(profile = null)

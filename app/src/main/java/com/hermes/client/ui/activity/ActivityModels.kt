@@ -47,7 +47,7 @@ fun sessionsToActivity(sessions: List<Session>): List<ActivityItem> = sessions.m
         timestampMs = s.lastActive,
         upcoming = false,
         status = null,
-        route = "chat/${s.id}",
+        route = com.hermes.client.ui.nav.chatRoute(s.id, s.profile),
         sessionId = s.id,
     )
 }

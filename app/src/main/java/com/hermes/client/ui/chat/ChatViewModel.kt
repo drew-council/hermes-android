@@ -52,6 +52,8 @@ class ChatViewModel @Inject constructor(
     fun registerServerRequestRenderer() = chat.setServerRequestHandlerAvailable(true)
     fun respondServerRequest(request: com.hermes.client.data.network.PendingServerRequest,
                              result: kotlinx.serialization.json.JsonObject): com.hermes.client.data.network.RespondOutcome {
+        if (request.sessionId != sessionId || _liveSessionId.value != sessionId || !_state.value.timeline.ready)
+            return com.hermes.client.data.network.RespondOutcome.STALE
         val outcome = chat.respondServerRequest(request, result)
         if (outcome == com.hermes.client.data.network.RespondOutcome.ENQUEUED && request.sessionId == sessionId) {
             val queueId = (request.params["request_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content
@@ -123,7 +125,8 @@ class ChatViewModel @Inject constructor(
     val profiles: StateFlow<List<ProfileDto>> = _profiles.asStateFlow()
 
     /** Active profile name — shown in the chat top bar so the user knows which tenant they're in. */
-    val activeProfile: StateFlow<String?> = profileManager.active
+    private val _ownerProfile = MutableStateFlow<String?>(null)
+    val activeProfile: StateFlow<String?> = _ownerProfile.asStateFlow()
 
     /** Slash-command catalog (name to description) for the composer palette. */
     private val _commands = MutableStateFlow<List<Pair<String, String>>>(emptyList())
@@ -140,15 +143,16 @@ class ChatViewModel @Inject constructor(
     private var recoveryJob: Job? = null
     private var epoch: Long = 0
 
-    fun open(id: String) {
+    fun open(id: String, ownerProfile: String? = null) {
         val owner = ++epoch
-        val profile = profileManager.active.value
+        val profileReady = kotlinx.coroutines.CompletableDeferred<String?>()
         initializationJob?.cancel()
         recoveryJob?.cancel()
         collectJob?.cancel()
         connJob?.cancel()
         sessionId = id
         _liveSessionId.value = null
+        _ownerProfile.value = ownerProfile
         _state.value = ChatUiState.empty()
         _initialDraft.value = null
         val ps = pendingShareStore.take(id)
@@ -168,15 +172,26 @@ class ChatViewModel @Inject constructor(
                 else if (event.sessionId == sessionId) _state.value = _state.value.reduce(event)
             }
         }
+        // Direct/restored chat entry must not depend on notification-service startup.
+        chat.connect()
         initializationJob = viewModelScope.launch {
-            val history = try {
+            val profile = ownerProfile ?: run {
+                profileManager.refresh()
+                profileManager.active.value
+            }
+            if (owner != epoch) return@launch
+            _ownerProfile.value = profile
+            profileReady.complete(profile)
+            var historyFailure: Exception? = null
+            var history = try {
                 sessions.historySnapshot(id, profile)
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
                 if (owner != epoch) return@launch
                 if (e is HermesApiException && e.code == 401) { _unauthorized.value = true; return@launch }
+                historyFailure = e
                 TimelineSnapshot(entries = listOf(TimelineEntry("history-unavailable", SourceRef(profile, id),
-                    TimelineBody.Notice("history-unavailable", "History unavailable"), OrderEvidence.RESUMED_UNKNOWN)))
+                    TimelineBody.Notice("history-unavailable", "History unavailable (${sessionFailureStatus("history", e)})"), OrderEvidence.RESUMED_UNKNOWN)))
             }
             if (owner != epoch) return@launch
             val resume = try { chat.resumeSnapshot(id, profile) }
@@ -185,7 +200,7 @@ class ChatViewModel @Inject constructor(
                     if (owner != epoch) return@launch
                     if (e is HermesApiException && e.code == 401) _unauthorized.value = true
                     _state.value = ChatUiState(messages = history.legacyMessages(), timeline = history)
-                    appendError("Couldn't resume session")
+                    appendError("Couldn't resume session (${sessionFailureStatus("resume", e)})")
                     initializing = false
                     recovering = true
                     buffered.clear()
@@ -195,11 +210,18 @@ class ChatViewModel @Inject constructor(
             val handle = resume.sessionId
             if (handle == null) {
                 _state.value = ChatUiState(messages = history.legacyMessages(), timeline = history)
-                appendError("Couldn't resume session")
+                appendError("Couldn't resume session (resume: missing-handle)")
                 initializing = false
                 recovering = true
                 buffered.clear()
                 return@launch
+            }
+            // Only the backend's live-unpersisted response proves that this 404 is a normal
+            // empty draft. Never hide missing/failed history for an existing stored session.
+            if ((historyFailure as? HermesApiException)?.code == 404 &&
+                resume.storedSessionId == id && resume.messageCount == 0 && resume.messages.isEmpty()) {
+                history = TimelineSnapshot(completeness = HistoryCompleteness(
+                    ownerProfile = profile, resolvedSessionId = id, mayHaveOlderRows = false))
             }
             sessionId = handle
             _liveSessionId.value = handle
@@ -235,24 +257,33 @@ class ChatViewModel @Inject constructor(
             launch { runCatching { chat.commandsCatalog() }.onSuccess { if (owner == epoch) _commands.value = it }.onFailure { if (it is CancellationException) throw it } }
         }
         connJob = viewModelScope.launch {
-            var prev: ConnectionState? = null
+            var previous: ConnectionState? = null
             chat.connectionState.collect { cur ->
                 if (owner != epoch) return@collect
-                if (cur is ConnectionState.Reconnecting || cur is ConnectionState.Error) {
+                if (cur is ConnectionState.Reconnecting || cur is ConnectionState.Error ||
+                    (cur is ConnectionState.Connecting && previous != null && !initializing)) {
                     // Losing transport is not evidence that server generation ended.
                     _state.value = _state.value.copy(timeline = _state.value.timeline.copy(ready = false, completeness = _state.value.timeline.completeness.copy(liveEventsIncomplete = true)))
                     recovering = true
                 }
-                if (cur is ConnectionState.Connected && (prev is ConnectionState.Reconnecting || prev is ConnectionState.Error) && !initializing) {
+                if (cur is ConnectionState.Connected && recovering && !initializing) {
                     recoveryJob?.cancel()
                     recoveryJob = launch {
                         try {
+                            val profile = profileReady.await()
                             val resume = chat.resumeSnapshot(id, profile)
                             if (owner != epoch) return@launch
                             val handle = resume.sessionId ?: return@launch
                             sessionId = handle
                             _liveSessionId.value = handle
-                            val fetched = sessions.historySnapshot(id, profile)
+                            val fetched = try { sessions.historySnapshot(id, profile) }
+                            catch (e: HermesApiException) {
+                                if (e.code == 404 && resume.storedSessionId == id &&
+                                    resume.messageCount == 0 && resume.messages.isEmpty()) TimelineSnapshot(
+                                    completeness = HistoryCompleteness(ownerProfile = profile,
+                                        resolvedSessionId = id, mayHaveOlderRows = false))
+                                else throw e
+                            }
                             if (owner != epoch) return@launch
                             val existing = _state.value.timeline.reconcileHistory(fetched)
                             val matching = buffered.filter { it.sessionId == handle }
@@ -268,11 +299,11 @@ class ChatViewModel @Inject constructor(
                             recovering = false
                         } catch (e: CancellationException) { throw e
                         } catch (e: Exception) {
-                            if (owner == epoch) appendError("Couldn't reconnect session")
+                            if (owner == epoch) appendError("Couldn't reconnect session (${sessionFailureStatus("reconnect", e)})")
                         }
                     }
                 }
-                prev = cur
+                previous = cur
             }
         }
     }
@@ -466,7 +497,7 @@ class ChatViewModel @Inject constructor(
     fun loadPersonas() {
         _personaUi.value = _personaUi.value.copy(loading = true, error = null)
         viewModelScope.launch {
-            runCatching { configRepo.get(profileManager.active.value) }
+            runCatching { configRepo.get(activeProfile.value) }
                 .onSuccess { cfg -> _personaUi.value = PersonaUi(parsePersonas(cfg), activePersonaOf(cfg)) }
                 .onFailure { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e

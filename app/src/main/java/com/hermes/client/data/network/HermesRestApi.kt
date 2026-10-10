@@ -37,16 +37,16 @@ class HermesRestApi(
     }
 
     private suspend inline fun <reified T> get(path: String): T = withContext(Dispatchers.IO) {
-        com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path")
+        com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET request")
         okHttp.newCall(builder(path).get().build()).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 com.hermes.client.data.diagnostics.DebugLog.log(
-                    "rest", "GET $path ← ${resp.code} ${body.take(200)}",
+                    "rest", "GET response HTTP ${resp.code}",
                 )
-                throw HermesApiException(resp.code, body.ifBlank { "HTTP ${resp.code}" })
+                throw HermesApiException(resp.code, "HTTP ${resp.code}")
             }
-            com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET $path ← ${resp.code}")
+            com.hermes.client.data.diagnostics.DebugLog.log("rest", "GET response HTTP ${resp.code}")
             json.decodeFromString<T>(body)
         }
     }

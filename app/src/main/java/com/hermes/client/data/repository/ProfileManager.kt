@@ -27,7 +27,9 @@ class ProfileManager @Inject constructor(private val profiles: ProfileRepository
 
     suspend fun refresh() {
         runCatching { _list.value = profiles.list() }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
         runCatching { _active.value = profiles.active() }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
     }
 
     /** Switches the gateway's active profile. No-op if already active. */

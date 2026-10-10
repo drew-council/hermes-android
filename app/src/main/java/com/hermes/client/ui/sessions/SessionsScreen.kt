@@ -196,7 +196,7 @@ fun SessionsScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { scope.launch { vm.createSession()?.let { onOpen(it) } } },
+                onClick = { scope.launch { vm.createSessionRoute()?.let { onOpen(it) } } },
                 text = { Text("New") },
                 icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
                 containerColor = com.hermes.client.ui.components.AccentChrome.fabContainer,
@@ -219,9 +219,8 @@ fun SessionsScreen(
                             ProjectScopeView(
                                 project = projectsState.scope!!,
                                 onBack = { vm.exitProject() },
-                                // Projects span profiles, so switch to the session's own profile
-                                // (awaited) before opening, or the chat resumes against the wrong DB.
-                                onOpenSession = { s -> scope.launch { vm.prepareOpen(s); onOpen(s.id) } },
+                                // Preserve the session owner in navigation, including restored entry.
+                                onOpenSession = { s -> scope.launch { onOpen(com.hermes.client.ui.nav.chatRoute(s.id, s.profile)) } },
                             )
                         projectsState.tree.isEmpty() ->
                             com.hermes.client.ui.components.EmptyState(
@@ -263,7 +262,7 @@ fun SessionsScreen(
                                 title = "No sessions yet",
                                 subtitle = "Start a conversation with the New button.",
                                 actionLabel = "New session",
-                                onAction = { scope.launch { vm.createSession()?.let { onOpen(it) } } },
+                                onAction = { scope.launch { vm.createSessionRoute()?.let { onOpen(it) } } },
                             )
                         else -> {
                             val q = query.trim()
@@ -287,7 +286,7 @@ fun SessionsScreen(
                                                 Text(r.snippet?.take(140)?.replace("\n", " ") ?: r.sessionId)
                                             },
                                             supportingContent = { Text(r.model ?: r.role ?: "") },
-                                            modifier = Modifier.clickable { onOpen(r.sessionId) },
+                                            modifier = Modifier.clickable { onOpen(com.hermes.client.ui.nav.chatRoute(r.sessionId, activeProfile)) },
                                         )
                                         HorizontalDivider()
                                     }
@@ -307,7 +306,7 @@ fun SessionsScreen(
                                     items(pinned, key = { "p-${it.id}" }) { s ->
                                         SessionRow(
                                             session = s, isPinned = true, showProfile = true,
-                                            onOpen = { scope.launch { vm.prepareOpen(s); onOpen(s.id) } },
+                                            onOpen = { scope.launch { onOpen(com.hermes.client.ui.nav.chatRoute(s.id, s.profile)) } },
                                             onTogglePin = { vm.togglePin(s) },
                                             onRename = { vm.rename(s, it) },
                                             onArchive = { vm.archive(s) },
@@ -321,7 +320,7 @@ fun SessionsScreen(
                                     items(recent, key = { it.id }) { s ->
                                         SessionRow(
                                             session = s, isPinned = false, showProfile = true,
-                                            onOpen = { scope.launch { vm.prepareOpen(s); onOpen(s.id) } },
+                                            onOpen = { scope.launch { onOpen(com.hermes.client.ui.nav.chatRoute(s.id, s.profile)) } },
                                             onTogglePin = { vm.togglePin(s) },
                                             onRename = { vm.rename(s, it) },
                                             onArchive = { vm.archive(s) },

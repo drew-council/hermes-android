@@ -79,7 +79,7 @@ fun ArchivedSessionsScreen(
                     items(state.sessions, key = { it.id }) { s ->
                         ArchivedRow(
                             session = s,
-                            onOpen = { onOpen(s.id) },
+                            onOpen = { onOpen(com.hermes.client.ui.nav.chatRoute(s.id, s.profile)) },
                             onUnarchive = { vm.unarchive(s) },
                             onDelete = { vm.delete(s) },
                         )

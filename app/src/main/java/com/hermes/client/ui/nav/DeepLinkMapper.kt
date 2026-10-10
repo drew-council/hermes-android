@@ -15,7 +15,11 @@ fun deepLinkRouteFor(raw: String): String? {
     val segs = uri.path.orEmpty().split('/').filter { it.isNotBlank() }
     return when (host) {
         "tab" -> segs.singleOrNull()?.takeIf { it in TAB_ROUTES }
-        "chat" -> segs.singleOrNull()?.takeIf { it.isNotBlank() && '/' !in it }?.let { "chat/$it" }
+        "chat" -> segs.singleOrNull()?.takeIf { it.isNotBlank() && '/' !in it }?.let { id ->
+            val profile = uri.rawQuery?.split('&')?.firstOrNull { it.startsWith("profile=") }
+                ?.substringAfter('=')?.let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+            chatRoute(id, profile)
+        }
         else -> null
     }
 }

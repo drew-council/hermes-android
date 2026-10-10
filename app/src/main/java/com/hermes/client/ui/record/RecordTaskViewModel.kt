@@ -126,9 +126,10 @@ class RecordTaskViewModel(
                     return@launch
                 }
                 refreshProfiles()
-                val id = createSession(activeProfile.value)
+                val profile = activeProfile.value
+                val id = createSession(profile)
                 pendingShareStore.put(id, PendingShare(text = text))
-                _navigateTo.emit(id)
+                _navigateTo.emit(com.hermes.client.ui.nav.chatRoute(id, profile))
                 _ui.value = RecordUi(RecordPhase.IDLE)
             } catch (e: CancellationException) {
                 throw e

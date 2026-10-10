@@ -208,8 +208,9 @@ class MainActivity : ComponentActivity() {
                 runCatching {
                     chat.connect() // idempotent; a cold start has no socket yet
                     profileManager.refresh() // load active profile so the session isn't orphaned to default
-                    chat.createSession(profileManager.active.value)
-                }.onSuccess { id -> pendingRoute.value = "chat/$id" }
+                    val profile = profileManager.active.value
+                    com.hermes.client.ui.nav.chatRoute(chat.createSession(profile), profile)
+                }.onSuccess { route -> pendingRoute.value = route }
                     .onFailure { e ->
                         if (e is kotlinx.coroutines.CancellationException) throw e
                         android.widget.Toast.makeText(
@@ -285,14 +286,15 @@ class MainActivity : ComponentActivity() {
                 // hits the gateway, so keep it inside runCatching — an offline cold-start share must
                 // surface the error toast, not crash.
                 profileManager.refresh()
-                chat.createSession(profileManager.active.value)
+                val profile = profileManager.active.value
+                chat.createSession(profile) to profile
             }
-                .onSuccess { id ->
+                .onSuccess { (id, profile) ->
                     pendingShare.put(
                         id,
                         com.hermes.client.share.PendingShare(text = caption, imageBase64 = b64, imageMime = mime),
                     )
-                    pendingRoute.value = "chat/$id"
+                    pendingRoute.value = com.hermes.client.ui.nav.chatRoute(id, profile)
                 }
                 .onFailure { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
